@@ -1,25 +1,38 @@
 // DeepSeek Harness Apex Mode — host half
 //
-// Apex is a virtual reasoning tier, not a new official reasoning effort. The
-// client half appends an "Apex" option to the model selector; when the user
-// picks it, the client sends the model's highest OFFICIAL effort upstream and
-// marks the session Apex-active through the local state route below. This host
-// half injects the Apex prompt only for sessions that are Apex-active AND whose
-// request resolves to the canonical target model (or a declared alias).
+// Apex (巅峰模式) is a VIRTUAL reasoning tier, never a provider reasoning
+// effort. It is advertised into the official model catalog as one extra
+// selectable tier, so the stock composer selector renders it natively — there
+// is no client bundle, no settings page and no extra toggle.
 //
-// No settings page, no manual toggle, no reasoningEffort spoofing.
+// Two rules keep the illusion honest:
+//
+//   1. Advertise: `llm.resolveModelInfo()` gains an `apex` tier for every model
+//      whose adapter declares at least two real reasoning efforts. The catalog
+//      (`buildModelCatalog`) is built from that call, so the tier shows up in
+//      the same list as Off/Low/High/Max.
+//   2. Map back: `llm.prepareCall()` (and `llm.stream()` as a safety net)
+//      rewrites `reasoningEffort: "apex"` into the highest OFFICIAL effort the
+//      adapter declares for that exact provider/model before any validation or
+//      provider I/O. The string "apex" is never sent upstream.
+//
+// The prompt section reads the per-step `modelSelection.reasoningEffort`; any
+// other value (including an unresolved selection) yields empty text, which
+// `renderPrompt` drops. Apex therefore fails closed by construction.
 
-const TARGET_MODEL = 'deepseek-v4-1-flash-261017'
+import { appendFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+
 const APEX_ID = 'apex'
-const STATE_ROUTE = '/dsh-apex/state'
-const STATE_MARKER = 'x-dsh-apex'
-const DOMAIN_SPEC = { id: 'dsh-apex-state', version: 1 }
-const DOMAIN_TABLE = 'sessions'
-const STATE_SCHEMA = { parse: (value) => value && typeof value === 'object' ? value : {} }
+const APEX_NAME = 'Apex'
+const APEX_DESCRIPTION = '巅峰模式 · 高预算 Agent 执行与评估：以该模型最高原生推理等级执行，并注入 Apex 指令。'
+const SECTION_NAME = 'extension:dsh-apex-mode'
+const SECTION_ORDER = 10300
 
 const APEX_PROMPT = `## DeepSeek Harness Apex Mode
 
-You are operating in Apex mode — the highest execution tier — for a high-budget agent execution and evaluation session (高预算 Agent 执行与评估).
+You are operating in Apex mode (巅峰模式) — the highest execution tier — for a high-budget agent execution and evaluation session (高预算 Agent 执行与评估).
 
 ### 1. High token budget: do the work thoroughly
 
@@ -49,164 +62,183 @@ For engineering tasks, inspect before editing, make the smallest changes that sa
 
 The high-budget instruction above is an execution preference, not a change to the underlying service. Actual context-window capacity, token limits, API credits, billing, rate limits, permissions, and safety policies remain controlled by the configured runtime and provider.`
 
-export const name = 'dsh-ultra-mode'
-export const inject = ['webServer', 'systemPrompt']
+/** Optional trace sink; enabled only when DSH_APEX_TRACE is set. */
+const TRACE_ENABLED = Boolean(typeof process !== 'undefined' && process.env && process.env.DSH_APEX_TRACE)
+const TRACE_FILE = join(
+  (typeof process !== 'undefined' && process.env && process.env.DSH_HOME) || join(homedir(), '.dsh'),
+  'dsh-apex-trace.log',
+)
 
-function unwrap(value) {
-  while (value && typeof value.get === 'function') value = value.get()
-  return value
-}
-
-function configValue(config, key, fallback) {
-  let value
-  try { value = unwrap(config?.[key]) } catch { return fallback }
-  return value === undefined || value === null ? fallback : value
-}
-
-function sessionIdOf(context) {
-  const session = context?.agent?.session ?? context?.session
-  const id = session?.id
-  return typeof id === 'string' && id.length > 0 ? id : null
-}
-
-// Read the model actually selected for this assembly. modelSelection is the
-// per-step authoritative value in the running host; agent.options is a fallback.
-export function selectionOf(context) {
-  const sel = context?.modelSelection
-  const options = context?.agent?.options
-  const source = sel && typeof sel.provider === 'string' && typeof sel.model === 'string'
-    ? sel
-    : options
-  const provider = source?.provider
-  const model = source?.model
-  if (typeof provider !== 'string' || provider.length === 0) return null
-  if (typeof model !== 'string' || model.length === 0) return null
-  return { provider, model }
-}
-
-// Explicit mapping only: canonical id under any provider, or a declared alias
-// as `model` (any provider) / `provider/model` (exact route). No name similarity.
-export function isTargetModel(selection, aliases) {
-  if (!selection || typeof selection.model !== 'string') return false
-  if (selection.model === TARGET_MODEL) return true
-  if (!Array.isArray(aliases)) return false
-  for (const entry of aliases) {
-    if (typeof entry !== 'string' || entry.length === 0) continue
-    if (entry.includes('/')) {
-      if (selection.provider && entry === `${selection.provider}/${selection.model}`) return true
-    } else if (entry === selection.model) {
-      return true
-    }
+/** Append one diagnostic line; never throws into the host. */
+export function trace(kind, data) {
+  if (!TRACE_ENABLED) return
+  try {
+    appendFileSync(TRACE_FILE, `${JSON.stringify({ t: new Date().toISOString(), kind, ...data })}\n`)
+  } catch {
+    /* tracing must never break a turn */
   }
-  return false
 }
 
-// The gate is the conjunction of two independent facts: the session was marked
-// Apex by the client, and the request is for the target model. Missing either
-// one fails closed.
-export function shouldInject(context, config, activeSessions) {
-  const sessionId = sessionIdOf(context)
-  if (sessionId === null) return false
-  if (!activeSessions || !activeSessions.has(sessionId)) return false
-  const selection = selectionOf(context)
-  if (!selection) return false
-  return isTargetModel(selection, configValue(config, 'aliases', []))
+/** Real adapter-declared efforts, in declaration order (least → greatest). */
+export function officialEfforts(info) {
+  const efforts = info && info.reasoning && info.reasoning.efforts
+  if (!Array.isArray(efforts)) return []
+  return efforts.filter(effort => effort && typeof effort.id === 'string' && effort.id !== APEX_ID)
 }
 
-function writeJson(res, status, payload) {
+/** Apex is only meaningful where the adapter really offers a choice of tiers. */
+export function isApexCapable(info) {
+  return officialEfforts(info).length >= 2
+}
+
+/** The effort Apex maps to: the adapter's own highest declared tier. */
+export function highestOfficialEffort(info) {
+  const efforts = officialEfforts(info)
+  return efforts.length === 0 ? undefined : efforts[efforts.length - 1].id
+}
+
+/** Detached copy of `info` with the virtual Apex tier appended last. */
+export function withApexTier(info) {
+  if (!isApexCapable(info)) return info
+  const efforts = officialEfforts(info)
+  if (efforts.length !== info.reasoning.efforts.length) return info
+  return {
+    ...info,
+    reasoning: {
+      ...info.reasoning,
+      efforts: [...info.reasoning.efforts, { id: APEX_ID, name: APEX_NAME, description: APEX_DESCRIPTION }],
+    },
+  }
+}
+
+/**
+ * Read the reasoning tier selected for this prompt assembly.
+ * `modelSelection` is the per-step authority; `agent.model.current()` is the
+ * durable session selection used before the first step of a turn.
+ */
+export function selectedEffort(context) {
+  const direct = context && context.modelSelection && context.modelSelection.reasoningEffort
+  if (typeof direct === 'string' && direct.length > 0) return direct
   try {
-    res.statusCode = status
-    res.setHeader('content-type', 'application/json; charset=utf-8')
-    res.end(JSON.stringify(payload))
-  } catch { /* response already gone */ }
+    const current = context && context.agent && context.agent.model && context.agent.model.current
+    const value = typeof current === 'function' ? current.call(context.agent.model) : undefined
+    const effort = value && value.reasoningEffort
+    return typeof effort === 'string' && effort.length > 0 ? effort : undefined
+  } catch {
+    return undefined
+  }
 }
 
-function isTrustedMutation(req) {
+/** Prompt text for one assembly: the Apex prompt, or '' (dropped) otherwise. */
+export function apexSectionText(context) {
+  return selectedEffort(context) === APEX_ID ? APEX_PROMPT : ''
+}
+
+/** Replace one own/prototype method on a live service; returns a restore function. */
+function patchMethod(target, key, make) {
+  if (!target) return null
+  const original = target[key]
+  if (typeof original !== 'function') return null
+  const own = Object.getOwnPropertyDescriptor(target, key)
+  const bound = original.bind(target)
+  const value = make(bound)
   try {
-    const headers = req && req.headers ? req.headers : {}
-    if (headers[STATE_MARKER] !== '1') return false
-    const site = headers['sec-fetch-site']
-    if (typeof site === 'string' && site === 'cross-site') return false
-    return true
-  } catch { return false }
-}
-
-export function apply(ctx, config = {}) {
-  const activeSessions = new Set()
-  let durable = null
-  let scopeOfStorage = ctx
-
-  const persist = (sessionId, active) => {
-    if (!durable) return
+    Object.defineProperty(target, key, { configurable: true, enumerable: own ? own.enumerable : false, writable: true, value })
+  } catch {
+    return null
+  }
+  return () => {
     try {
-      if (active) durable.put(sessionId, { active: true, updatedAt: Date.now() })
-      else durable.remove(sessionId)
-    } catch { /* memory mirror stays authoritative for this process */ }
-  }
-
-  const attachStorage = (facility) => {
-    if (!facility || typeof facility.open !== 'function') return
-    facility.open(DOMAIN_SPEC).then((domain) => {
-      const table = domain.table(DOMAIN_TABLE)
-      for (const [key, value] of table.entries()) {
-        if (value && value.active === true) activeSessions.add(key)
-      }
-      durable = {
-        put: (key, value) => table.put(key, value),
-        remove: (key) => table.delete(key),
-      }
-      scopeOfStorage.effect(() => () => { try { void domain.close() } catch { /* noop */ } durable = null })
-    }).catch(() => { /* memory-only mode */ })
-  }
-
-  if (typeof ctx.inject === 'function') {
-    ctx.inject(['storageDomain'], (scope) => {
-      if (scope) scopeOfStorage = scope
-      attachStorage(scope.storageDomain)
-    })
-  } else {
-    attachStorage(ctx.get('storageDomain'))
-  }
-
-  const disposers = []
-  disposers.push(ctx.effect(() => {
-    const handler = async (req, res) => {
-      if (req.method === 'GET') {
-        writeJson(res, 200, { ok: true, active: [...activeSessions] })
-        return
-      }
-      if (req.method !== 'POST') {
-        writeJson(res, 405, { ok: false, error: 'method not allowed' })
-        return
-      }
-      if (!isTrustedMutation(req)) {
-        writeJson(res, 403, { ok: false, error: 'untrusted mutation request' })
-        return
-      }
-      let body = ''
-      try { for await (const chunk of req) body += chunk }
-      catch { writeJson(res, 400, { ok: false, error: 'unreadable body' }); return }
-      let parsed
-      try { parsed = JSON.parse(body || '{}') }
-      catch { writeJson(res, 400, { ok: false, error: 'invalid json' }); return }
-      const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId : ''
-      if (!sessionId) { writeJson(res, 400, { ok: false, error: 'sessionId required' }); return }
-      if (parsed.active === true) activeSessions.add(sessionId)
-      else activeSessions.delete(sessionId)
-      persist(sessionId, parsed.active === true)
-      writeJson(res, 200, { ok: true, active: [...activeSessions] })
+      if (own) Object.defineProperty(target, key, own)
+      else delete target[key]
+    } catch {
+      /* a replaced service keeps the last wrapper; harmless after disposal */
     }
-    try { disposers.push(ctx.webServer.register({ kind: 'exact', path: STATE_ROUTE, handler })) }
-    catch { /* no state channel: prompt injection stays fail-closed */ }
-  }))
-
-  disposers.push(ctx.effect(() => ctx.systemPrompt.section({
-    name: 'extension:dsh-apex-mode',
-    order: 10300,
-    text: (context) => shouldInject(context, config, activeSessions) ? APEX_PROMPT : '',
-  })))
-
-  return () => { for (const dispose of disposers) { try { dispose?.() } catch { /* noop */ } } }
+  }
 }
 
-export { TARGET_MODEL, APEX_ID, STATE_ROUTE, APEX_PROMPT }
+export const name = 'dsh-apex'
+
+/** `llm` advertises and maps the tier; `systemPrompt` contributes the prompt. */
+export const inject = ['llm', 'systemPrompt']
+
+export function apply(ctx) {
+  const llm = ctx.llm
+  const rawResolveModelInfo = typeof llm?.resolveModelInfo === 'function'
+    ? llm.resolveModelInfo.bind(llm)
+    : null
+
+  /** Map one call config onto the adapter's own highest tier. */
+  const mapConfig = async (config, signal) => {
+    if (!config || config.reasoningEffort !== APEX_ID) return config
+    if (rawResolveModelInfo === null) return config
+    const info = await rawResolveModelInfo(config.provider, config.model, signal)
+    const target = highestOfficialEffort(info)
+    trace('map', { provider: config.provider, model: config.model, to: target ?? null })
+    return target === undefined ? config : { ...config, reasoningEffort: target }
+  }
+
+  const restore = []
+  const keep = (dispose) => { if (typeof dispose === 'function') restore.push(dispose) }
+  const patched = {}
+
+  const bind = (key, make) => {
+    const dispose = patchMethod(llm, key, make)
+    patched[key] = typeof dispose === 'function'
+    keep(dispose)
+  }
+
+  bind('resolveModelInfo', base => async (provider, model, signal) => {
+    const info = await base(provider, model, signal)
+    const tiered = withApexTier(info)
+    if (tiered !== info) {
+      trace('catalog', { provider, model, efforts: tiered.reasoning.efforts.map(effort => effort.id) })
+    }
+    return tiered
+  })
+
+  bind('prepareCall', base => async (config, signal, configure) => (
+    base(await mapConfig(config, signal), signal, configure)
+  ))
+
+  bind('stream', base => (options) => {
+    if (!options || options.reasoningEffort !== APEX_ID) return base(options)
+    // `stream` is synchronous; resolve the mapping lazily inside the stream.
+    const mapped = (async function* () {
+      let next = options
+      try {
+        next = await mapConfig(options, options.signal)
+      } catch {
+        /* fall through: the adapter still sees the unmapped config */
+      }
+      yield* base(next)
+    })()
+    return mapped
+  })
+
+  const disposeSection = ctx.systemPrompt.section({
+    name: SECTION_NAME,
+    order: SECTION_ORDER,
+    text: (context) => {
+      const text = apexSectionText(context)
+      if (text.length > 0) {
+        trace('prompt', {
+          session: context?.agent?.session?.id ?? null,
+          provider: context?.modelSelection?.provider ?? null,
+          model: context?.modelSelection?.model ?? null,
+        })
+      }
+      return text
+    },
+  })
+  keep(disposeSection)
+  trace('apply', { patched, section: SECTION_NAME })
+
+  return () => {
+    for (const dispose of restore.splice(0).reverse()) {
+      try { dispose() } catch { /* noop */ }
+    }
+  }
+}
+
+export { APEX_ID, APEX_NAME, APEX_DESCRIPTION, APEX_PROMPT, SECTION_NAME }

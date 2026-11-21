@@ -1,20 +1,17 @@
 {
   "name": "dsh-ultra-mode",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "DeepSeek Harness Apex Mode — a virtual highest reasoning tier that injects a high-budget execution prompt for the deepseek-v4-1-flash-261017 model or configured aliases. No settings page, no manual toggle.",
+  "description": "DeepSeek Harness Apex Mode (巅峰模式) — a virtual highest reasoning tier that shows up in the official reasoning-effort selector, maps to the model's own highest native effort upstream, and injects a high-budget agent execution prompt. Host-only: no client bundle, no settings page, no toggle.",
   "type": "module",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js",
-    "./client.js": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
-    "client.js",
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
@@ -23,13 +20,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-slots"
-      ],
-      "platform": "web"
     }
   },
   "license": "MIT",

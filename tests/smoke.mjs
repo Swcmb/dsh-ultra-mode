@@ -1,104 +1,203 @@
+// Apex Mode host-half smoke tests.
+//
+// These tests drive the real exported `apply()` against a fake Cordis context
+// that mimics the two host services the plugin touches: the LLM registry
+// (whose `resolveModelInfo` feeds the browser model catalog) and the system
+// prompt registry. Every assertion is about observable behaviour — what the
+// catalog advertises and what would be sent upstream — never about internals.
+
 import assert from 'node:assert/strict'
-import { apply, inject, name, isTargetModel, shouldInject, selectionOf, TARGET_MODEL, APEX_ID, STATE_ROUTE, APEX_PROMPT } from '../index.js'
+import {
+  APEX_ID,
+  APEX_PROMPT,
+  SECTION_NAME,
+  apply,
+  apexSectionText,
+  highestOfficialEffort,
+  isApexCapable,
+  name as pluginName,
+  inject as pluginInject,
+  selectedEffort,
+  withApexTier,
+} from '../index.js'
 
-// ── metadata ──────────────────────────────────────────────────────────────
-assert.equal(name, 'dsh-ultra-mode')
-assert.deepEqual(inject, ['webServer', 'systemPrompt'])
-assert.equal(TARGET_MODEL, 'deepseek-v4-1-flash-261017')
-assert.equal(APEX_ID, 'apex')
-assert.equal(STATE_ROUTE, '/dsh-apex/state')
-assert.match(APEX_PROMPT, /DeepSeek Harness Apex Mode/)
-assert.match(APEX_PROMPT, /Apex mode .* high-budget agent execution and evaluation session/)
-
-const cfg = (overrides = {}) => ({ aliases: [], ...overrides })
-const ctxFor = (sessionId, provider, model) => ({
-  agent: { session: { id: sessionId }, options: { provider, model } },
-})
-const active = (...ids) => new Set(ids)
-
-// ── selectionOf ───────────────────────────────────────────────────────────
-assert.deepEqual(selectionOf(ctxFor('s1', 'p', 'm')), { provider: 'p', model: 'm' })
-assert.deepEqual(selectionOf({ modelSelection: { provider: 'p2', model: 'm2' }, agent: { options: { provider: 'p', model: 'm' } } }), { provider: 'p2', model: 'm2' })
-assert.equal(selectionOf({ modelSelection: { provider: '', model: 'm' } }), null)
-assert.equal(selectionOf({}), null)
-
-// ── isTargetModel ─────────────────────────────────────────────────────────
-assert.equal(isTargetModel({ provider: 'p', model: TARGET_MODEL }, []), true)
-assert.equal(isTargetModel({ provider: 'any', model: TARGET_MODEL }, []), true)
-assert.equal(isTargetModel({ provider: 'p', model: 'alias-x' }, ['alias-x']), true)
-assert.equal(isTargetModel({ provider: 'p', model: 'alias-x' }, ['p/alias-x']), true)
-assert.equal(isTargetModel({ provider: 'q', model: 'alias-x' }, ['p/alias-x']), false)
-assert.equal(isTargetModel({ provider: 'p', model: 'hy4-flash-free' }, []), false)
-assert.equal(isTargetModel({ provider: 'p', model: 'deepseek-v4.1-flash-free' }, []), false)
-assert.equal(isTargetModel(null, []), false)
-assert.equal(isTargetModel({ provider: 'p' }, ['x']), false)
-assert.equal(isTargetModel({ provider: 'p', model: 'x' }, ['', null, 42]), false)
-
-// ── shouldInject: session marked Apex AND target model ────────────────────
-assert.equal(shouldInject(ctxFor('s1', 'p', TARGET_MODEL), cfg(), active('s1')), true)
-assert.equal(shouldInject(ctxFor('s1', 'p', 'hy4-flash-free'), cfg(), active('s1')), false)
-assert.equal(shouldInject(ctxFor('s1', 'p', TARGET_MODEL), cfg(), active('s2')), false)
-assert.equal(shouldInject(ctxFor('s1', 'p', TARGET_MODEL), cfg(), new Set()), false)
-assert.equal(shouldInject(ctxFor('s1', 'p', TARGET_MODEL), cfg(), null), false)
-assert.equal(shouldInject(ctxFor('s1', 'p', 'alias-x'), cfg({ aliases: ['alias-x'] }), active('s1')), true)
-assert.equal(shouldInject({}, cfg(), active('s1')), false, 'no session -> no inject')
-assert.equal(shouldInject({ agent: { session: { id: 's1' } } }, cfg(), active('s1')), false, 'no model -> no inject')
-assert.equal(shouldInject(ctxFor('s1', 'p', TARGET_MODEL), { aliases: 'bad' }, active('s1')), true)
-assert.equal(shouldInject(ctxFor('s1', 'p', 'x'), { aliases: { get: () => ['x'] } }, active('s1')), true, 'volatile aliases unwrapped')
-
-// ── apply: registration, dynamic text, state route, lifecycle ────────────
-let section
-let routeHandler
-let disposedSection = false
-let disposedRoute = false
-const routes = []
-const ctx = {
-  webServer: {
-    register(route) {
-      routes.push(route)
-      if (route.path === STATE_ROUTE) routeHandler = route.handler
-      return () => { disposedRoute = true }
-    },
+const DEEPSEEK = {
+  provider: 'deepseek',
+  id: 'deepseek-v4-1-flash-261017',
+  name: 'DeepSeek V4.1 Flash',
+  reasoning: {
+    efforts: [
+      { id: 'off', name: 'Off' },
+      { id: 'low', name: 'Low' },
+      { id: 'high', name: 'High' },
+      { id: 'max', name: 'Max' },
+    ],
+    defaultEffort: 'high',
   },
-  systemPrompt: {
-    section(s) { section = s; return () => { section = undefined; disposedSection = true } },
-  },
-  effect(register) { const d = register(); this.disposers = (this.disposers || []).concat([d]); return d },
-  inject(service, cb) { if (typeof cb === 'function') cb({}); return () => {} },
 }
-const dispose = apply(ctx, cfg())
-assert.equal(section.name, 'extension:dsh-apex-mode')
-assert.equal(section.order, 10300)
-assert.equal(typeof section.text, 'function')
-assert.ok(routes.some((r) => r.path === STATE_ROUTE), 'state route registered')
-assert.equal(typeof routeHandler, 'function')
 
-assert.equal(section.text(ctxFor('s1', 'p', TARGET_MODEL)), '', 'no apex session -> empty')
-const jsonResponse = () => ({ statusCode: 200, setHeader() {}, end(body) { this.body = body } })
-const request = (sessionId, activeFlag, marker) => ({
-  method: 'POST',
-  headers: marker === false ? {} : { 'x-dsh-apex': '1' },
-  async *[Symbol.asyncIterator]() { yield JSON.stringify({ sessionId, active: activeFlag }) },
-})
-const res1 = jsonResponse()
-await routeHandler(request('s1', true), res1)
-assert.equal(res1.statusCode, 200)
-assert.equal(section.text(ctxFor('s1', 'p', TARGET_MODEL)), APEX_PROMPT, 'apex + target -> prompt')
-assert.equal(section.text(ctxFor('s1', 'p', 'hy4-flash-free')), '', 'apex + non-target -> empty')
-const res2 = jsonResponse()
-await routeHandler(request('s1', false), res2)
-assert.equal(section.text(ctxFor('s1', 'p', TARGET_MODEL)), '', 'deactivated -> empty')
+const MULTI = {
+  provider: 'acme',
+  id: 'acme-thinker',
+  name: 'Acme Thinker',
+  reasoning: {
+    efforts: [
+      { id: 'low', name: 'Low' },
+      { id: 'medium', name: 'Medium' },
+      { id: 'high', name: 'High' },
+      { id: 'xhigh', name: 'Extra High' },
+    ],
+  },
+}
 
-const bad = jsonResponse()
-await routeHandler(request('s1', true, false), bad)
-assert.equal(bad.statusCode, 403, 'missing marker -> 403')
-const get = jsonResponse()
-await routeHandler({ method: 'GET', headers: {} }, get)
-assert.equal(get.statusCode, 200)
+const PLAIN = { provider: 'acme', id: 'acme-plain', name: 'Acme Plain' }
+const OFF_ONLY = { provider: 'acme', id: 'acme-off-only', name: 'Off only', reasoning: { efforts: [{ id: 'off', name: 'Off' }] } }
+const MODELS = new Map([[DEEPSEEK.id, DEEPSEEK], [MULTI.id, MULTI], [PLAIN.id, PLAIN], [OFF_ONLY.id, OFF_ONLY]])
 
-dispose()
-assert.equal(section, undefined)
-assert.equal(disposedSection, true)
-assert.equal(disposedRoute, true)
+function fakeRuntime() {
+  const calls = { prepare: [], stream: [], resolve: [] }
+  const llm = {
+    async resolveModelInfo(provider, model) {
+      calls.resolve.push([provider, model])
+      const found = MODELS.get(model)
+      if (!found) throw new Error(`unknown model ${model}`)
+      return structuredClone(found)
+    },
+    async prepareCall(config, signal, configure) {
+      calls.prepare.push({ config, configure })
+      return { config: { ...config }, stream: () => (async function* () {})() }
+    },
+    stream(options) {
+      calls.stream.push(options)
+      return (async function* () { yield { type: 'seen', options } })()
+    },
+  }
+  const sections = []
+  const ctx = {
+    llm,
+    systemPrompt: {
+      section(section) {
+        sections.push(section)
+        return () => sections.splice(sections.indexOf(section), 1)
+      },
+    },
+  }
+  return { ctx, calls, sections, llm }
+}
 
-console.log('DSH Apex Mode smoke test passed')
+function testMetadata() {
+  assert.equal(pluginName, 'dsh-apex')
+  assert.deepEqual([...pluginInject].sort(), ['llm', 'systemPrompt'])
+}
+
+function testTierHelpers() {
+  assert.equal(isApexCapable(DEEPSEEK), true)
+  assert.equal(isApexCapable(OFF_ONLY), false)
+  assert.equal(isApexCapable(PLAIN), false)
+  assert.equal(highestOfficialEffort(DEEPSEEK), 'max')
+  assert.equal(highestOfficialEffort(MULTI), 'xhigh')
+  assert.equal(highestOfficialEffort(PLAIN), undefined)
+
+  const tiered = withApexTier(DEEPSEEK)
+  assert.equal(tiered.reasoning.efforts.at(-1).id, APEX_ID)
+  assert.equal(tiered.reasoning.efforts.length, DEEPSEEK.reasoning.efforts.length + 1)
+  assert.equal(DEEPSEEK.reasoning.efforts.at(-1).id, 'max', 'source must stay untouched')
+  // Re-applying must not stack a second Apex row.
+  assert.equal(withApexTier(tiered).reasoning.efforts.length, tiered.reasoning.efforts.length)
+}
+
+function testSelectionReaders() {
+  assert.equal(selectedEffort({ modelSelection: { reasoningEffort: APEX_ID } }), APEX_ID)
+  assert.equal(selectedEffort({ agent: { model: { current: () => ({ reasoningEffort: APEX_ID }) } } }), APEX_ID)
+  assert.equal(selectedEffort({ agent: { model: { current: () => ({}) } } }), undefined)
+  assert.equal(selectedEffort(undefined), undefined)
+  assert.equal(selectedEffort({ modelSelection: { reasoningEffort: 'max' } }), 'max')
+
+  assert.equal(apexSectionText({ modelSelection: { reasoningEffort: APEX_ID } }), APEX_PROMPT)
+  assert.equal(apexSectionText({ modelSelection: { reasoningEffort: 'max' } }), '')
+  assert.equal(apexSectionText({}), '')
+  assert.equal(apexSectionText(undefined), '')
+}
+
+async function testCatalogAdvertisesApex() {
+  const { ctx } = fakeRuntime()
+  const dispose = apply(ctx)
+  try {
+    const info = await ctx.llm.resolveModelInfo('deepseek', DEEPSEEK.id)
+    assert.deepEqual(info.reasoning.efforts.map(e => e.id), ['off', 'low', 'high', 'max', APEX_ID])
+    assert.equal(info.reasoning.defaultEffort, 'high', 'default effort must not move')
+    assert.equal(info.reasoning.efforts.at(-1).name, 'Apex')
+
+    const plain = await ctx.llm.resolveModelInfo('acme', PLAIN.id)
+    assert.equal(plain.reasoning, undefined)
+
+    const offOnly = await ctx.llm.resolveModelInfo('acme', OFF_ONLY.id)
+    assert.deepEqual(offOnly.reasoning.efforts.map(e => e.id), ['off'])
+  } finally {
+    dispose()
+  }
+  // Disposal restores the untouched registry projection.
+  const after = await ctx.llm.resolveModelInfo('deepseek', DEEPSEEK.id)
+  assert.equal(after.reasoning.efforts.some(e => e.id === APEX_ID), false)
+}
+
+async function testPrepareCallMapsApexToHighestOfficial() {
+  const { ctx, calls } = fakeRuntime()
+  const dispose = apply(ctx)
+  try {
+    await ctx.llm.prepareCall({ provider: 'deepseek', model: DEEPSEEK.id, reasoningEffort: APEX_ID })
+    assert.equal(calls.prepare.at(-1).config.reasoningEffort, 'max')
+
+    await ctx.llm.prepareCall({ provider: 'acme', model: MULTI.id, reasoningEffort: APEX_ID })
+    assert.equal(calls.prepare.at(-1).config.reasoningEffort, 'xhigh')
+
+    // Every other tier passes through untouched, including "off".
+    await ctx.llm.prepareCall({ provider: 'deepseek', model: DEEPSEEK.id, reasoningEffort: 'off' })
+    assert.equal(calls.prepare.at(-1).config.reasoningEffort, 'off')
+    await ctx.llm.prepareCall({ provider: 'deepseek', model: DEEPSEEK.id })
+    assert.equal(calls.prepare.at(-1).config.reasoningEffort, undefined)
+  } finally {
+    dispose()
+  }
+}
+
+async function testStreamSafetyNet() {
+  const { ctx } = fakeRuntime()
+  const dispose = apply(ctx)
+  try {
+    const chunks = []
+    for await (const chunk of ctx.llm.stream({ provider: 'deepseek', model: DEEPSEEK.id, reasoningEffort: APEX_ID })) chunks.push(chunk)
+    assert.equal(chunks.length, 1)
+    assert.equal(chunks[0].options.reasoningEffort, 'max')
+
+    const passthrough = []
+    for await (const chunk of ctx.llm.stream({ provider: 'deepseek', model: DEEPSEEK.id, reasoningEffort: 'low' })) passthrough.push(chunk)
+    assert.equal(passthrough[0].options.reasoningEffort, 'low')
+  } finally {
+    dispose()
+  }
+}
+
+function testSectionRegistration() {
+  const { ctx, sections } = fakeRuntime()
+  const dispose = apply(ctx)
+  assert.equal(sections.length, 1)
+  assert.equal(sections[0].name, SECTION_NAME)
+  assert.equal(sections[0].text({ modelSelection: { reasoningEffort: APEX_ID } }), APEX_PROMPT)
+  assert.equal(sections[0].text({ modelSelection: { reasoningEffort: 'high' } }), '')
+  dispose()
+  assert.equal(sections.length, 0, 'section must be released on disposal')
+}
+
+async function main() {
+  testMetadata()
+  testTierHelpers()
+  testSelectionReaders()
+  await testCatalogAdvertisesApex()
+  await testPrepareCallMapsApexToHighestOfficial()
+  await testStreamSafetyNet()
+  testSectionRegistration()
+  console.log('apex smoke: all assertions passed')
+}
+
+await main()
