@@ -197,6 +197,12 @@ export function apply(ctx) {
     return tiered
   })
 
+  // `session.selectModel` validates the requested tier through resolveCallConfig
+  // before recording it, so the mapping must exist here as well.
+  bind('resolveCallConfig', base => async (config, signal) => (
+    base(await mapConfig(config, signal), signal)
+  ))
+
   bind('prepareCall', base => async (config, signal, configure) => (
     base(await mapConfig(config, signal), signal, configure)
   ))

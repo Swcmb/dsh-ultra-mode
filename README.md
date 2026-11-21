@@ -30,7 +30,7 @@ $$
 插件是**纯 host 半端**（没有 `client.js`）。三处都走 DSH 自己的服务，不碰 DOM、不改核心：
 
 1. **上架档位** —— 包装 `ctx.llm.resolveModelInfo()`：当某个 provider/model 的适配器声明了 ≥2 个真实档位时，在 `reasoning.efforts` 末尾追加 `{ id: 'apex', name: 'Apex' }`。浏览器端模型目录（`buildModelCatalog`）正是由这个调用投影出来的，因此官方选择器会原生渲染它，无需任何 UI 注入。
-2. **映射回来** —— 包装 `ctx.llm.prepareCall()`：看到 `reasoningEffort === 'apex'` 时，先用**未包装的** `resolveModelInfo()` 读该模型官方档位，取最后一个（DSH 约定：数组由低到高）替换后再交给原实现。因此后续的 `UNSUPPORTED_REASONING_EFFORT` 校验、`preparedCall` 的配置一致性检查、以及上游请求都是合法官方值。`ctx.llm.stream()` 也做了同样的兜底映射。
+2. **映射回来** —— 包装 `ctx.llm.resolveCallConfig()` 与 `ctx.llm.prepareCall()`：看到 `reasoningEffort === 'apex'` 时，先用**未包装的** `resolveModelInfo()` 读该模型官方档位，取最后一个（DSH 约定：数组由低到高）替换后再交给原实现。`resolveCallConfig` 是 `session.selectModel` 在记录选择前的校验入口，`prepareCall` 是每一步校验并准备请求的入口，两处都必须映射，否则选择会被 `UNSUPPORTED_REASONING_EFFORT` 拒绝。`ctx.llm.stream()` 也做了同样的兜底映射，因此 `apex` 永远不会到达适配器或上游。
 3. **注入提示词** —— `ctx.systemPrompt.section()` 的 `text(context)` 读取 `context.modelSelection.reasoningEffort`（每一步的权威选择），只有在等于 `apex` 时返回提示词，其余情况返回空字符串；DSH 的 `renderPrompt` 会丢弃空段。会话未选中、模型无档位、上下文缺失，一律不注入（fail-closed）。
 
 会话状态里保存的仍是 `apex` 这个选择值，所以切走再切回、或换到另一个支持推理的模型，Apex 会保持在选中状态，并按新模型的官方最高档执行——这正是「元档位」的语义。
@@ -49,6 +49,7 @@ npm test
 
 - 元数据与服务注入（`llm`、`systemPrompt`）
 - 目录投影：DeepSeek 模型得到 `off, low, high, max, apex`；无推理 / 单档位模型不追加
+- 选择校验：`resolveCallConfig('apex')` 被映射为官方档，`session.selectModel` 不会拒绝
 - `prepareCall`：`apex → max`（DeepSeek）、`apex → xhigh`（自定义多档模型）；`off` 与省略值原样透传
 - `stream` 兜底映射与透传
 - 提示词门控：选中 apex 才返回提示词，其余为空

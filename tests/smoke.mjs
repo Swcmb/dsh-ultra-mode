@@ -55,7 +55,7 @@ const OFF_ONLY = { provider: 'acme', id: 'acme-off-only', name: 'Off only', reas
 const MODELS = new Map([[DEEPSEEK.id, DEEPSEEK], [MULTI.id, MULTI], [PLAIN.id, PLAIN], [OFF_ONLY.id, OFF_ONLY]])
 
 function fakeRuntime() {
-  const calls = { prepare: [], stream: [], resolve: [] }
+  const calls = { prepare: [], stream: [], resolve: [], validate: [] }
   const llm = {
     async resolveModelInfo(provider, model) {
       calls.resolve.push([provider, model])
@@ -66,6 +66,10 @@ function fakeRuntime() {
     async prepareCall(config, signal, configure) {
       calls.prepare.push({ config, configure })
       return { config: { ...config }, stream: () => (async function* () {})() }
+    },
+    async resolveCallConfig(config) {
+      calls.validate.push({ ...config })
+      return { ...config }
     },
     stream(options) {
       calls.stream.push(options)
@@ -161,6 +165,20 @@ async function testPrepareCallMapsApexToHighestOfficial() {
   }
 }
 
+async function testSelectModelValidation() {
+  const { ctx, calls } = fakeRuntime()
+  const dispose = apply(ctx)
+  try {
+    // `session.selectModel` rejects an unknown tier through this exact call.
+    await ctx.llm.resolveCallConfig({ provider: 'deepseek', model: DEEPSEEK.id, reasoningEffort: APEX_ID })
+    assert.equal(calls.validate.at(-1).reasoningEffort, 'max')
+    await ctx.llm.resolveCallConfig({ provider: 'deepseek', model: DEEPSEEK.id, reasoningEffort: 'high' })
+    assert.equal(calls.validate.at(-1).reasoningEffort, 'high')
+  } finally {
+    dispose()
+  }
+}
+
 async function testStreamSafetyNet() {
   const { ctx } = fakeRuntime()
   const dispose = apply(ctx)
@@ -194,6 +212,7 @@ async function main() {
   testTierHelpers()
   testSelectionReaders()
   await testCatalogAdvertisesApex()
+  await testSelectModelValidation()
   await testPrepareCallMapsApexToHighestOfficial()
   await testStreamSafetyNet()
   testSectionRegistration()
