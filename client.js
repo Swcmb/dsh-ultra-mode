@@ -392,7 +392,7 @@ window.__ModuleLoader__.load({
         return dir
       }
 
-      ctx.inject(['modelDirectories', 'remote', 'remote.session'], (scope) => {
+      ctx.inject(['modelDirectories'], (scope) => {
         scope.slots.inject(SEAT, () => scope.slots.register(
           { name: SEAT, id: ENTRY, priority: SEAT_PRIORITY, label: () => 'Apex' },
           (props) => h(ApexSeat, {
@@ -412,7 +412,9 @@ window.__ModuleLoader__.load({
       })
     }
 
+    const inject = ['slots', 'sessions', 'modelDirectories', 'remote', 'remote.session']
     exports.apply = apply
+    exports.inject = inject
     return module.exports
   },
 })
