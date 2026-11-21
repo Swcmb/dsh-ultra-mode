@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-ultra-mode
+      name: dsh-ultra-mode
+      disabled: false
