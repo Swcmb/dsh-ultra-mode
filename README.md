@@ -34,12 +34,19 @@ If you want Ultra Mode on a model that is not the canonical target, use the manu
 
 ## Settings
 
-Two volatile settings are exposed in the DSH settings UI (Settings → **DSH Ultra Mode**) and persisted into the active profile patch:
+Two volatile settings are persisted into the active profile patch:
 
 | Setting | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `manualEnable` | boolean | `false` | When on, enables Ultra Mode for the current model and overrides model gating. Off restores the gate immediately. |
 | `aliases` | string[] | `[]` | Provider/model aliases of the canonical target model. A hit injects the prompt automatically. |
+
+The `manualEnable` switch appears in **two places, both the same setting**:
+
+- A compact **⚡ Ultra ON/OFF** chip in the composer tool row (next to Auto-Continue). Click it to flip manual authorization without opening Settings. Styled like the other DSH tool-row chips: 24px pill, green when ON, subtle hover background when OFF.
+- A checkbox under Settings → **DSH Ultra Mode**.
+
+Both read and write the same volatile field through `configForms`, so they stay in sync with each other and with the running plugin instantly — no reload. `aliases` is configured only from the Settings page.
 
 `aliases` entries accept two forms:
 
