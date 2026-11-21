@@ -1,8 +1,8 @@
 {
   "name": "dsh-ultra-mode",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Model-gated Ultra mode prompt bundle for DeepSeek Harness: injects high-budget instructions only for the canonical deepseek-v4-1-flash-261017 model or its configured aliases, with a fail-closed manual override.",
+  "description": "DeepSeek Harness Apex Mode — a virtual highest reasoning tier that injects a high-budget execution prompt for the deepseek-v4-1-flash-261017 model or configured aliases. No settings page, no manual toggle.",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -25,17 +25,12 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
+      "immediately": true,
       "inject": [
-        "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-plugin-manager"
+        "@deepseek-ai/dsh-client-ui-slots"
       ],
       "platform": "web"
     }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/schemastery": ">=3.18.0 <4"
   },
   "license": "MIT",
   "scripts": {
