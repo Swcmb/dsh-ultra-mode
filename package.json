@@ -1,12 +1,13 @@
 {
   "name": "dsh-ultra-mode",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "Model-gated Ultra mode prompt bundle for DeepSeek Harness: injects high-budget instructions only for the canonical deepseek-v4-1-flash-261017 model or its configured aliases, with a fail-closed manual override.",
   "type": "module",
   "main": "./index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./client.js": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
@@ -25,6 +26,8 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-plugin-manager"
       ],
